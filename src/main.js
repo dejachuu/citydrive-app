@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CARS, NPC_TYPES, NPC_COLORS, makeCar, disposeCar } from './cars.js';
 import { CITIES, LEFT_HAND, fetchOSM, parseOSM, proceduralCity, buildWorld, samplePath } from './world.js';
@@ -72,6 +73,20 @@ composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), .3, .55, .92);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
+// gentle film grade: a touch of contrast and saturation plus a soft vignette
+composer.addPass(new ShaderPass({
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; varying vec2 vUv;
+    void main() {
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      float l = dot(c, vec3(.2126, .7152, .0722));
+      c = mix(vec3(l), c, 1.08);
+      c = mix(c, c * c * (3.0 - 2.0 * c), .18);
+      vec2 d = vUv - .5; c *= 1.0 - dot(d, d) * .55;
+      gl_FragColor = vec4(c, 1.0);
+    }`,
+}));
 
 // ---------------------------------------------------------------- showroom
 const show = { scene: new THREE.Scene(), cam: new THREE.PerspectiveCamera(30, 1, .1, 200), car: null, t: .6 };
@@ -171,8 +186,20 @@ $('tMenu').addEventListener('click', () => openMenu());
 $('hudMenu').addEventListener('click', () => openMenu());
 
 // ---------------------------------------------------------------- quality & time
+// dynamic resolution: drop the render scale when frames run slow (integrated GPUs), raise it again when there is headroom
+const dyn = { scale: 1, acc: 0, n: 0 };
+function adaptResolution(dt) {
+  dyn.acc += dt; dyn.n++;
+  if (dyn.acc < 1.2) return;
+  const avg = dyn.acc / dyn.n; dyn.acc = 0; dyn.n = 0;
+  if (document.hidden) return;
+  let s = dyn.scale;
+  if (avg > 1 / 40) s = Math.max(.5, s - .1); else if (avg < 1 / 56) s = Math.min(1, s + .05);
+  if (s !== dyn.scale) { dyn.scale = s; const pr = QUALITY[settings.quality].pr * s; renderer.setPixelRatio(pr); composer.setPixelRatio(pr); }
+}
 function applyQuality() {
   const q = QUALITY[settings.quality];
+  dyn.scale = 1; dyn.acc = 0; dyn.n = 0;
   renderer.setPixelRatio(q.pr); renderer.setSize(innerWidth, innerHeight);
   composer.setPixelRatio(q.pr); composer.setSize(innerWidth, innerHeight);
   sun.castShadow = q.shadows;
@@ -313,7 +340,7 @@ function spawnNPCs(count) {
     const type = NPC_TYPES[(Math.random() * NPC_TYPES.length) | 0];
     const taxi = curCity?.taxi && type.id === 'n-sedan' && Math.random() < .6;
     const color = taxi ? '#f5c400' : NPC_COLORS[(Math.random() * NPC_COLORS.length) | 0];
-    const car = makeCar(type, color, { shadows: false, taxi });
+    const car = makeCar(type, color, { shadows: false, taxi, lod: true });
     car.body.children[0].castShadow = settings.quality !== 'low';
     const n = { car, road: null, rev: false, s: 0, speed: 8, cruise: 10, x: 0, z: 0, yaw: 0, stopT: 0, waitT: 0, ghostT: 0 };
     placeNPC(n, i < count * .4 ? 'near' : 'any');
@@ -605,6 +632,8 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 1 / 8);
   if (state === 'play') {
     update(dt);
+    world?.update?.(clock.elapsedTime);
+    adaptResolution(dt);
     renderer.toneMappingExposure = TIMES[settings.time].exp;
     if (QUALITY[settings.quality].bloom) composer.render(); else renderer.render(scene, camera);
   } else if (state === 'menu') renderShowroom(dt);
@@ -648,7 +677,7 @@ async function loadCity(city, half) {
   if (world) { scene.remove(world.group); world.dispose(); }
   clearNPCs();
   skids.count = 0; skidIdx = 0;
-  world = buildWorld(data);
+  world = buildWorld(data, { lat: city.procedural || !usedReal ? undefined : city.lat, lon: city.procedural || !usedReal ? undefined : city.lon, quality: settings.quality });
   world.left = usedReal && !!city.left;
   scene.add(world.group);
   curCity = usedReal ? city : null;
@@ -787,8 +816,8 @@ async function checkUpdate() {
 setTimeout(checkUpdate, 4000); setInterval(checkUpdate, 3 * 60 * 1000);
 
 // ---------------------------------------------------------------- boot
-window.citydrive = { player, npcs, get world() { return world; } }; // handy for debugging in the console
+window.citydrive = { player, npcs, show, camera, renderer, scene, composer, get world() { return world; } }; // handy for debugging in the console
 renderCities(); renderCars(); setSeg('timeSeg', settings.time); setSeg('qualSeg', settings.quality);
 applyQuality(); onResize();
 $('boot').classList.add('done');
-setTimeout(() => $('boot').remove(), 900);
+setTimeout(() => $('boot')?.remove(), 900);
