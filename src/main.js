@@ -6,7 +6,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { CARS, NPC_TYPES, NPC_COLORS, makeCar, disposeCar } from './cars.js';
+import { CARS, NPC_TYPES, NPC_COLORS, makeCar, disposeCar, loadCarModel, modelReady } from './cars.js';
 import { CITIES, LEFT_HAND, fetchOSM, parseOSM, proceduralCity, buildWorld, samplePath } from './world.js';
 import { GameAudio } from './audio.js';
 
@@ -19,8 +19,10 @@ const nextFrame = () => new Promise(r => setTimeout(r, 40)); // lets the loading
 
 // ---------------------------------------------------------------- settings
 const saved = (() => { try { return JSON.parse(localStorage.getItem('citydrive') || '{}'); } catch { return {}; } })();
-const settings = Object.assign({ carId: 'sf90', colors: {}, cityId: 'monaco', time: 'day', quality: isTouch ? 'low' : 'high', custom: null }, saved);
+const settings = Object.assign({ carId: 'concept', colors: {}, cityId: 'monaco', time: 'day', quality: isTouch ? 'low' : 'high', custom: null }, saved);
 const save = () => localStorage.setItem('citydrive', JSON.stringify(settings));
+// v3 introduced the real 3D-model car: show it once to existing players too
+if (!settings.seenModelCar) { settings.carId = 'concept'; settings.seenModelCar = true; save(); }
 
 const QUALITY = {
   low: { pr: 1, shadows: false, bloom: false, shadowSize: 1024, fog: 900, half: 500, npc: 14 },
@@ -695,6 +697,7 @@ async function drive() {
     state = 'loading';
     const ok = await loadCity(city, q.half);
     worldKey = ok ? key : 'fallback';
+    await ensureModel();
     setPlayerCar();
     placePlayer(world.spawn.x, world.spawn.z, world.spawn.yaw);
     spawnNPCs(q.npc);
@@ -704,10 +707,17 @@ async function drive() {
     if (!localStorage.getItem('citydrive-helped')) { $('help').classList.add('show'); localStorage.setItem('citydrive-helped', '1'); setTimeout(() => $('help').classList.remove('show'), 12000); }
   } else {
     const keepX = player.x, keepZ = player.z, keepYaw = player.yaw;
+    await ensureModel();
     setPlayerCar(); placePlayer(keepX, keepZ, keepYaw);
+    $('loading').classList.remove('show');
   }
   applyTime();
   resume();
+}
+async function ensureModel() {
+  const s = currentSpec(); if (!s.glb || modelReady(s)) return;
+  $('loading').classList.add('show'); setLoading(`Loading the ${s.make} ${s.model}…`);
+  try { await loadCarModel(s); } catch (e) { console.warn(e); toast('Could not load the 3D car model; using the simple version.'); }
 }
 function resume() {
   state = 'play';
@@ -741,6 +751,7 @@ function renderCars() {
   const cur = settings.colors[s.id] || s.color;
   $('swatches').innerHTML = s.colors.map(c => `<button style="--c:${c}" data-c="${c}" class="${c === cur ? 'on' : ''}" aria-label="Paint ${c}"></button>`).join('');
   $('carIdx').textContent = `${CARS.indexOf(s) + 1} / ${CARS.length}`;
+  if (s.glb && !modelReady(s)) loadCarModel(s).then(() => { if (currentSpec() === s && state !== 'play') renderCars(); }).catch(e => console.warn('car model', e));
   if (show.car) { show.scene.remove(show.car.root); disposeCar(show.car); }
   show.car = makeCar(s, cur, { shadows: true });
   show.scene.add(show.car.root);

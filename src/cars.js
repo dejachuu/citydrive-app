@@ -1,6 +1,7 @@
 // Procedural car models + specs.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 // Side profile: heights (m) at key points along the length (x = metres from centre, front is +x)
 const P = (nose, hoodX, hood, cowlX, cowl, wsX, roof, roofX, deckX, deck, tail) =>
@@ -8,6 +9,10 @@ const P = (nose, hoodX, hood, cowlX, cowl, wsX, roof, roofX, deckX, deck, tail) 
 
 // mid: mid-engine (side intakes), light/tail: lamp styles, rimStyle: wheel design, cal: brake caliper colour
 export const CARS = [
+  // Real 3D model: "Car Concept" by Eric Chadwick / Darmstadt Graphics Group, CC BY 4.0 (Khronos glTF Sample Assets), modified.
+  { id: 'concept', make: 'Concept', model: 'GT Coupé', glb: 'models/concept.glb', color: '#c00000', colors: ['#c00000', '#e9e9eb', '#18191b', '#1f4f9a', '#d9a400'],
+    L: 4.2, W: 2.08, wb: 2.7, r: .47, clr: .15, p: P(.6, 1.6, .78, .8, .9, 0, 1.22, -.6, -1.35, 1.0, .96),
+    taper: .18, topKmh: 330, zero100: 2.9, hp: 760, grip: 1.06, cyl: 8, mid: true, light: 'slim', tail: 'bar', rimStyle: 'star' },
   { id: 'sf90', make: 'Ferrari', model: 'SF90 Stradale', color: '#b3121b', colors: ['#b3121b', '#f2c500', '#f4f4f4', '#111111', '#1d3f8f'],
     L: 4.71, W: 1.97, wb: 2.65, r: .35, clr: .17, p: P(.52, 1.65, .76, .85, .9, -.15, 1.18, -.6, -1.35, 1.0, .96),
     taper: .18, topKmh: 340, zero100: 2.5, hp: 986, grip: 1.05, cyl: 8, mid: true, light: 'slim', tail: 'pair', rimStyle: 'twin', cal: '#f2c500' },
@@ -608,6 +613,7 @@ function makeWheel(s, tw, side, lod) {
 
 // ---------- assembly
 export function makeCar(s, color, opts = {}) {
+  if (modelReady(s)) return makeModelCar(s, color, opts);
   const m = getShared();
   const { W, wb, r, p } = s, h = s.L / 2;
   const pr = profile(s);
@@ -707,6 +713,123 @@ export function makeCar(s, color, opts = {}) {
 
   root.traverse(o => { if (o.isMesh && o !== blob) { o.castShadow = !!opts.shadows; } });
   return { root, body, wheels, paint, headMat, tailMat, spec: s };
+}
+
+// ---------- real 3D models (.glb)
+const models = new Map(); // url -> { promise, tpl }
+export function modelReady(s) { return !!(s.glb && models.get(s.glb)?.tpl); }
+export function loadCarModel(s) {
+  if (!s.glb) return Promise.resolve(null);
+  let e = models.get(s.glb);
+  if (!e) {
+    e = {};
+    e.promise = new GLTFLoader().loadAsync(s.glb).then(g => { e.tpl = prepareModel(g.scene); return e.tpl; });
+    e.promise.catch(() => models.delete(s.glb));
+    models.set(s.glb, e);
+  }
+  return e.promise;
+}
+function prepareModel(scene) {
+  const imgOf = (t) => t && (t.source?.data || t.image);
+  let logo = null;
+  scene.traverse(o => { if (o.isMesh && o.material.name === 'License') logo = imgOf(o.material.map); });
+  const plate = canvasTex('modelPlate', 512, 128, (g, w, h) => drawPlate(g, w / 2, h / 2, w * .96, h * .9, plateText(hash('concept')), false));
+  plate.flipY = false;
+  const fixed = new Set();
+  scene.traverse(o => {
+    if (!o.isMesh) return;
+    if (/SteeringEmblem/.test(o.name)) o.visible = false;
+    const m = o.material; if (fixed.has(m)) return; fixed.add(m);
+    // remove the sample's brand logos
+    if (logo && imgOf(m.emissiveMap) === logo) { m.emissiveMap = null; m.emissive.set(0); }
+    if (m.name === 'License') { m.map = plate; m.aoMap = null; }
+    if (m.name === 'Tireside' && m.map) m.map = cleanTire(m.map);
+    // see-through glass without the costly transmission pass
+    if (m.transmission > 0) {
+      m.transmission = 0; m.transparent = true; m.opacity = .32; m.color.set(0x1a2026); m.roughness = 0; m.metalness = 0; m.envMapIntensity = 1.4; m.depthWrite = false;
+    }
+    m.needsUpdate = true;
+  });
+  // wheel layout (model units)
+  const box = new THREE.Box3(), c = new THREE.Vector3(), sz = new THREE.Vector3();
+  scene.updateMatrixWorld(true);
+  const wheels = [];
+  for (const n of ['WheelFrontL', 'WheelFrontR', 'WheelRearL', 'WheelRearR']) {
+    const o = scene.getObjectByName(n); if (!o) continue;
+    box.setFromObject(o); box.getCenter(c); box.getSize(sz);
+    wheels.push({ name: n, front: n.includes('Front'), c: c.clone(), r: Math.max(sz.y, sz.z) / 2 });
+  }
+  const rr = Math.min(...wheels.map(w => w.r));
+  const cy = wheels[0].c.y, zf = wheels.filter(w => w.front)[0].c.z, zr = wheels.filter(w => !w.front)[0].c.z;
+  return { scene, wheels, r: rr, ground: cy - rr, mid: (zf + zr) / 2, wb: zf - zr };
+}
+function cleanTire(t) {
+  const im = t.image, c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+  const g = c.getContext('2d'); g.drawImage(im, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height), p = d.data;
+  // the sidewall is a flat dark grey; anything brighter is printed branding -> paint it out
+  const base = [p[0], p[1], p[2]];
+  for (let i = 0; i < p.length; i += 4) if (Math.abs(p[i] - base[0]) + Math.abs(p[i + 1] - base[1]) + Math.abs(p[i + 2] - base[2]) > 24) { p[i] = base[0]; p[i + 1] = base[1]; p[i + 2] = base[2]; }
+  g.putImageData(d, 0, 0);
+  const nt = new THREE.CanvasTexture(c); nt.flipY = t.flipY; nt.colorSpace = t.colorSpace; nt.wrapS = t.wrapS; nt.wrapT = t.wrapT; nt.anisotropy = 8;
+  nt.channel = t.channel; nt.repeat.copy(t.repeat); nt.offset.copy(t.offset);
+  return nt;
+}
+function makeModelCar(s, color, opts) {
+  const tpl = models.get(s.glb).tpl, m = getShared();
+  const k = (s.wb) / tpl.wb; // scale so the wheelbase matches the spec
+  const root = new THREE.Group(), body = new THREE.Group(); root.add(body);
+  const inner = tpl.scene.clone(true);
+  const holder = new THREE.Group(); holder.add(inner);
+  holder.rotation.y = Math.PI / 2; holder.scale.setScalar(k);
+  holder.position.set(-tpl.mid * k, -tpl.ground * k, 0);
+  body.add(holder);
+  // per-car materials
+  let paint = null, headMat = null, tailMat = null;
+  const swap = new Map();
+  inner.traverse(o => {
+    if (!o.isMesh) return;
+    const mt = o.material;
+    if (!swap.has(mt)) {
+      let nm = mt;
+      if (/^Paint 1/.test(mt.name)) { nm = mt.clone(); nm.color.set(color); nm.metalness = .6; nm.roughness = .28; nm.clearcoat = 1; nm.clearcoatRoughness = .03; paint = nm; }
+      else if (mt.name === 'Headlight') { nm = mt.clone(); nm.emissiveIntensity = 1.2; headMat = nm; }
+      else if (mt.name === 'Brakelight') { nm = mt.clone(); tailMat = nm; }
+      swap.set(mt, nm);
+    }
+    o.material = swap.get(mt);
+    o.castShadow = !!opts.shadows && !/^Interior/.test(o.name) && !o.material.transparent;
+    o.receiveShadow = !!opts.shadows;
+  });
+  paint ||= new THREE.MeshPhysicalMaterial({ color });
+  headMat ||= new THREE.MeshStandardMaterial(); tailMat ||= new THREE.MeshStandardMaterial();
+  // wheels: re-parent into pivot (steer) / spin (roll) groups in the car frame
+  root.updateMatrixWorld(true);
+  const wheels = [], bx = new THREE.Box3(), c = new THREE.Vector3();
+  for (const w of tpl.wheels) {
+    const node = inner.getObjectByName(w.name); if (!node) continue;
+    bx.setFromObject(node); bx.getCenter(c);
+    const pivot = new THREE.Group(), spin = new THREE.Group();
+    pivot.position.copy(c); root.add(pivot); pivot.add(spin); pivot.updateMatrixWorld(true);
+    for (const part of [...node.children]) (/BrakePad/.test(part.name) ? pivot : spin).attach(part);
+    // the sample poses its front wheels steered: find the tyre's axle and turn the wheel straight
+    let tire = null; spin.traverse(o => { if (o.isMesh && /Tire/.test(o.material.name) && !tire) tire = o; });
+    if (tire) {
+      tire.geometry.computeBoundingBox(); const e = tire.geometry.boundingBox.getSize(new THREE.Vector3());
+      const ax = e.x <= e.y && e.x <= e.z ? new THREE.Vector3(1, 0, 0) : e.y <= e.z ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+      tire.updateWorldMatrix(true, false);
+      ax.transformDirection(tire.matrixWorld);
+      const target = new THREE.Vector3(0, 0, Math.sign(ax.z) || 1);
+      if (ax.dot(target) < .9999) {
+        const q = new THREE.Quaternion().setFromUnitVectors(ax, target);
+        for (const p of [...spin.children, ...pivot.children.filter(o => o !== spin)]) { p.position.applyQuaternion(q); p.quaternion.premultiply(q); }
+      }
+    }
+    wheels.push({ pivot, spin, front: w.front });
+  }
+  const blob = new THREE.Mesh(cached('blob' + s.id, () => new THREE.PlaneGeometry(s.L * 1.2, s.W * 1.45).rotateX(-Math.PI / 2)), m.blob);
+  blob.position.y = .06; blob.renderOrder = 8; root.add(blob);
+  return { root, body, wheels, paint, headMat, tailMat, spec: s, model: true };
 }
 
 export function disposeCar(c) {

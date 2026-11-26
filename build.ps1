@@ -7,6 +7,6 @@ $html = [IO.File]::ReadAllText("$P\index.html")
 $html = [regex]::Replace($html, '<meta name="build" content="\d+">', "<meta name=`"build`" content=`"$code`">")
 [IO.File]::WriteAllText("$P\index.html", $html, [Text.UTF8Encoding]::new($false))
 # Files published to the site (relative paths)
-$script:SiteFiles = @('index.html', 'version.txt', 'src/main.js', 'src/cars.js', 'src/world.js', 'src/audio.js', '.nojekyll')
+$script:SiteFiles = @('index.html', 'version.txt', 'src/main.js', 'src/cars.js', 'src/world.js', 'src/audio.js', 'models/concept.glb', '.nojekyll')
 if (-not (Test-Path "$P\.nojekyll")) { New-Item -ItemType File "$P\.nojekyll" | Out-Null }
 Write-Host "Built City Drive build $code"
